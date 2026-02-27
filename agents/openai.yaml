@@ -1,0 +1,5 @@
+﻿version: 1
+interface:
+  display_name: Halo Auto Publisher
+  short_description: Bing+GitHub grounded article and image generation with direct Halo publishing.
+  default_prompt: 输入一个主题后，先检索近30天内内容并可读取GitHub仓库，再生成中文文章与配图并直接发布到Halo。

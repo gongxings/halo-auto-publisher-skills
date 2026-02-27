@@ -1,0 +1,6 @@
+{
+  "HALO_BASE_URL": "https://halo.example.com",
+  "HALO_TOKEN": "xxx",
+  "HALO_UPLOAD_ENDPOINT": "/apis/api.console.halo.run/v1alpha1/attachments/upload",
+  "HALO_POST_ENDPOINT": "/apis/api.console.halo.run/v1alpha1/posts"
+}
