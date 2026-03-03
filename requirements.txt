@@ -1,0 +1,11 @@
+# Halo Article Publisher - Python Dependencies
+# Install with: pip install -r requirements.txt
+
+# Core dependencies (already in your environment)
+# requests - 已安装
+
+# Optional: SVG conversion via cairosvg (requires system cairo)
+cairosvg>=2.7.0
+
+# Note: For better SVG quality, also install Inkscape:
+# https://inkscape.org/release/inkscape-1.4/

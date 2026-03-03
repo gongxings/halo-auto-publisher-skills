@@ -82,17 +82,10 @@ def publish_post(
     published = publish_status.upper() == "PUBLISHED"
 
     # Generate English-only slug from title
-    slug = generate_slug(title)
-    
-    # Ensure slug uniqueness by adding timestamp if needed
-    # (Halo will reject duplicate names)
     import time
-    original_slug = slug
-    counter = 0
-    while counter < 5:  # Try a few variations
-        if counter > 0:
-            slug = f"{original_slug}-{int(time.time())}"
-        break
+    slug = generate_slug(title)
+    # Always add timestamp suffix for guaranteed uniqueness
+    slug = f"{slug}-{int(time.time())}"
 
     # Build spec with required fields
     spec: dict = {
