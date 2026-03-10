@@ -14,9 +14,13 @@ tags:
 author: gongxings
 ---
 
-# Halo Article Publisher v2.1
+# Halo Article Publisher v2.2
 
 Publish an existing Markdown article to Halo blog platform with full Halo 2.x support, automatic SVG conversion, remote image fetching, and content optimization.
+
+## ✨ New in v2.2
+
+- **🔐 `.env` File Support**: Store `HALO_BASE_URL` and `HALO_TOKEN` in a `.env` file — no need to pass credentials on every run. Place `.env` next to `scripts/` and it is loaded automatically at startup.
 
 ## ✨ New in v2.1
 
@@ -330,8 +334,10 @@ The tool automatically optimizes Markdown for Halo:
 This tool uses Halo 2.x Console API:
 
 - **Create Post**: `POST /apis/api.console.halo.run/v1alpha1/posts`
-- **Upload Attachment**: `POST /apis/content.halo.run/v1alpha1/attachments`
+- **Upload Attachment**: `POST /apis/api.console.halo.run/v1alpha1/attachments/upload` (requires `policyName` form field, falls back to `/apis/content.halo.run/v1alpha1/attachments`)
 - **Publish Post**: `POST /apis/api.console.halo.run/v1alpha1/posts/{name}/publish`
+
+The upload response URL is read from `metadata.annotations["storage.halo.run/uri"]` and prefixed with `HALO_BASE_URL`.
 
 Payload structure follows Halo 2.x PostRequest schema with required fields:
 ```json
