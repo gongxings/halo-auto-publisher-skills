@@ -1,14 +1,185 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import mimetypes
 import os
 import re
 import tempfile
 from pathlib import Path
+from urllib.parse import urlparse
+
+import requests
+
+
+def _load_dotenv():
+    """从脚本目录（或其父目录）查找 .env 文件并加载，已存在的环境变量不会被覆盖。"""
+    search_dirs = [
+        Path(__file__).parent,          # scripts/
+        Path(__file__).parent.parent,   # 项目根目录
+    ]
+    for d in search_dirs:
+        env_file = d / ".env"
+        if env_file.exists():
+            with open(env_file, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    key, _, val = line.partition("=")
+                    key = key.strip()
+                    val = val.strip().strip('"').strip("'")
+                    if key and key not in os.environ:
+                        os.environ[key] = val
+            break  # 找到第一个就停止
+
+
+_load_dotenv()
 
 from common import assert_env, get_markdown_title, generate_slug, sanitize_summary
 from halo_client import publish_post, publish_post_to_live, upload_attachment
 from image_processor import ImageProcessor
+
+
+def _is_real_image_url(url: str) -> bool:
+    """
+    判断远程 URL 是否是需要下载的真实图片（而非徽章、SVG 图表等）。
+    返回 True 表示应该下载并上传到 Halo。
+    """
+    parsed = urlparse(url)
+    netloc = parsed.netloc.lower()
+    path = parsed.path.lower()
+
+    # 跳过：徽章/图表类域名
+    skip_domains = [
+        "shields.io",
+        "img.shields.io",
+        "star-history.com",
+        "api.star-history.com",
+        "badgen.net",
+        "badge.fury.io",
+        "travis-ci.org",
+        "travis-ci.com",
+        "codecov.io",
+        "coveralls.io",
+    ]
+    for domain in skip_domains:
+        if netloc == domain or netloc.endswith("." + domain):
+            return False
+
+    # 跳过：URL 路径含有徽章关键词
+    skip_keywords = ["badge", "shield", "workflow/badge", "actions/workflows"]
+    for kw in skip_keywords:
+        if kw in path:
+            return False
+
+    # 跳过：SVG 文件
+    if path.endswith(".svg"):
+        return False
+
+    # 跳过：GitHub camo 代理（通常代理的是外部徽章）
+    if netloc == "camo.githubusercontent.com":
+        return False
+
+    # 满足以下条件之一视为真实图片：
+    # 1. 常见图片扩展名
+    real_exts = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tiff", ".avif"}
+    suffix = Path(path.split("?")[0]).suffix.lower()
+    if suffix in real_exts:
+        return True
+
+    # 2. GitHub 用户上传的附件（user-attachments / assets）
+    if "user-attachments" in url or "/assets/" in path:
+        return True
+
+    # 3. GitHub raw 内容
+    if netloc == "raw.githubusercontent.com":
+        return True
+
+    # 4. 私有 GitHub 用户图片（private-user-images）
+    if "private-user-images.githubusercontent.com" in netloc:
+        return True
+
+    return False
+
+
+def fetch_and_upload_remote_images(markdown: str, work_dir: Path, upload_func) -> str:
+    """
+    扫描 Markdown 中所有远程图片引用（https://...），
+    对符合条件的真实图片：下载 → 上传到 Halo → 替换为 Halo URL。
+    下载失败时打印警告并保留原始 URL，不中断流程。
+    """
+    pattern = r'!\[([^\]]*)\]\((https?://[^)]+)\)'
+    matches = re.findall(pattern, markdown)
+
+    if not matches:
+        return markdown
+
+    # 去重：同一 URL 只下载一次
+    unique_urls = list(dict.fromkeys(url for _, url in matches))
+    real_urls = [u for u in unique_urls if _is_real_image_url(u)]
+
+    if not real_urls:
+        print("[*] 未发现需要抓取的远程图片（徽章/SVG 已跳过）")
+        return markdown
+
+    print(f"[*] 发现 {len(real_urls)} 张远程图片，开始下载并上传...")
+
+    url_map: dict[str, str] = {}  # 原始 URL → Halo URL
+
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/120.0.0.0 Safari/537.36"
+        )
+    }
+
+    for url in real_urls:
+        try:
+            resp = requests.get(url, headers=headers, timeout=15)
+            resp.raise_for_status()
+
+            # 推断文件扩展名
+            content_type = resp.headers.get("Content-Type", "")
+            ext = mimetypes.guess_extension(content_type.split(";")[0].strip()) or ""
+            # mimetypes 在 Windows 上可能返回 .jpe，统一修正
+            ext_map = {".jpe": ".jpg", ".jpeg": ".jpg", "": ".png"}
+            ext = ext_map.get(ext, ext)
+
+            # 也可从 URL 路径推断
+            if not ext or ext not in {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}:
+                url_path = urlparse(url).path
+                url_ext = Path(url_path.split("?")[0]).suffix.lower()
+                if url_ext in {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}:
+                    ext = url_ext
+                else:
+                    ext = ".png"  # 兜底
+
+            # 以 URL hash 命名，避免重复
+            url_hash = hashlib.md5(url.encode()).hexdigest()[:10]
+            local_path = work_dir / f"remote_{url_hash}{ext}"
+            local_path.write_bytes(resp.content)
+
+            halo_url = upload_func(str(local_path))
+            url_map[url] = halo_url
+            print(f"[+] 远程图片已上传: {url[:60]}{'...' if len(url) > 60 else ''}")
+
+        except Exception as e:
+            print(f"[!] 远程图片下载/上传失败（保留原URL）: {url[:60]}{'...' if len(url) > 60 else ''}\n    原因: {e}")
+
+    if not url_map:
+        return markdown
+
+    # 替换 Markdown 中所有匹配到的 URL
+    def repl(match: re.Match) -> str:
+        alt = match.group(1)
+        url = match.group(2)
+        if url in url_map:
+            return f"![{alt}]({url_map[url]})"
+        return match.group(0)
+
+    return re.sub(pattern, repl, markdown)
 
 
 def optimize_content_for_halo(markdown: str, skip_svg: bool = False) -> str:
@@ -130,10 +301,14 @@ def publish_article(
             article_md, work_dir, upload_attachment
         )
         
-        # 3. 优化内容
+        # 3. 抓取并上传远程图片（真实截图/预览图，跳过徽章/SVG图表）
+        print("[*] 扫描并下载远程图片...")
+        article_md = fetch_and_upload_remote_images(article_md, work_dir, upload_attachment)
+        
+        # 4. 优化内容
         article_md = optimize_content_for_halo(article_md, skip_svg=False)
         
-        # 4. 处理外部图片目录（包括嵌入的图片引用）
+        # 5. 处理外部图片目录（包括嵌入的图片引用）
         if images_dir:
             images_dir_path = Path(images_dir)
             if images_dir_path.exists():
@@ -141,6 +316,8 @@ def publish_article(
                 article_md = replace_image_urls(article_md, images_dir_path, upload_attachment)
         
         title = get_markdown_title(article_path_obj)
+        # 去掉内容中的一级标题行，避免 Halo 渲染时标题重复显示
+        article_md = re.sub(r'^#\s+.+\n?', '', article_md, count=1).lstrip('\n')
         summary = sanitize_summary(article_md, max_len=160)
         
         # 发布文章

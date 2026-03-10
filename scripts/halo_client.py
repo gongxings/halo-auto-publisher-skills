@@ -25,28 +25,78 @@ def _halo_url(path: str) -> str:
 
 
 def upload_attachment(file_path: str) -> str:
-    # Halo 2.x uses /apis/content.halo.run/v1alpha1/attachments
-    endpoint = os.getenv("HALO_UPLOAD_ENDPOINT", "/apis/content.halo.run/v1alpha1/attachments")
-    url = _halo_url(endpoint)
+    """
+    上传附件到 Halo。
+    优先使用 console API（/apis/api.console.halo.run/v1alpha1/attachments/upload），
+    需要携带 policyName 参数，URL 从响应的 metadata.annotations 中提取。
+    若失败则回退到旧端点。
+    """
+    base = assert_env("HALO_BASE_URL").rstrip("/")
+    policy_name = os.getenv("HALO_ATTACHMENT_POLICY", "default-policy")
+    group_name = os.getenv("HALO_ATTACHMENT_GROUP", "")
 
-    def _do() -> dict:
+    # 优先用 console upload 端点
+    console_endpoint = "/apis/api.console.halo.run/v1alpha1/attachments/upload"
+    fallback_endpoint = os.getenv("HALO_UPLOAD_ENDPOINT", "/apis/content.halo.run/v1alpha1/attachments")
+
+    def _do_console() -> str:
+        url = base + console_endpoint
         with open(file_path, "rb") as fp:
-            resp = requests.post(url, headers=_halo_headers(), files={"file": (Path(file_path).name, fp)}, timeout=60)
+            import mimetypes as _mt
+            mime = _mt.guess_type(file_path)[0] or "application/octet-stream"
+            resp = requests.post(
+                url,
+                headers=_halo_headers(),
+                files={"file": (Path(file_path).name, fp, mime)},
+                data={"policyName": policy_name, "groupName": group_name},
+                timeout=60,
+            )
         resp.raise_for_status()
-        return resp.json()
+        data = resp.json()
+        # 从 metadata.annotations 取相对 URI，再拼 base URL
+        annotations = (data.get("metadata") or {}).get("annotations") or {}
+        uri = annotations.get("storage.halo.run/uri", "")
+        if uri:
+            return base + uri
+        # 兜底：尝试其他字段
+        for candidate in [
+            data.get("url"),
+            data.get("permalink"),
+            (data.get("status") or {}).get("permalink"),
+            (data.get("spec") or {}).get("url"),
+        ]:
+            if candidate:
+                return candidate
+        raise RuntimeError(f"Cannot extract URL from upload response: {data}")
 
-    data = with_retry(_do)
-    candidates = [
-        data.get("url"),
-        data.get("permalink"),
-        (data.get("status") or {}).get("permalink"),
-        (data.get("spec") or {}).get("url"),
-        (data.get("data") or {}).get("url"),
-    ]
-    for c in candidates:
-        if c:
-            return c
-    raise RuntimeError("Halo upload response did not include attachment URL")
+    def _do_fallback() -> str:
+        url = base + fallback_endpoint
+        with open(file_path, "rb") as fp:
+            resp = requests.post(
+                url,
+                headers=_halo_headers(),
+                files={"file": (Path(file_path).name, fp)},
+                timeout=60,
+            )
+        resp.raise_for_status()
+        data = resp.json()
+        for candidate in [
+            data.get("url"),
+            data.get("permalink"),
+            (data.get("status") or {}).get("permalink"),
+            (data.get("spec") or {}).get("url"),
+            (data.get("data") or {}).get("url"),
+        ]:
+            if candidate:
+                return candidate
+        raise RuntimeError("Halo upload response did not include attachment URL")
+
+    # 先尝试 console 端点，失败则回退
+    try:
+        return with_retry(_do_console)
+    except Exception as e:
+        print(f"[!] console 上传端点失败，尝试回退端点: {e}")
+        return with_retry(_do_fallback)
 
 
 def publish_post(
